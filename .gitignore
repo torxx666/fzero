@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+.venv
+venv/
+ENV/
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+.eslintcache
+.stylelintcache
+.vite/
+.node_repl_history
+
+# Docker
+.dockerignore
+
+# App Specific (Temporary Media)
+backend/*.webm
+backend/*.wav
+backend/temp_*
+backend/synth_*
+backend/last_voice_ref.wav
+models/**
+!models/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
