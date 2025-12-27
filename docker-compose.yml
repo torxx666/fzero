@@ -10,7 +10,6 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - HF_HOME=/root/.cache/huggingface
-    # Uncomment for GPU support if nvidia-docker is installed
     # deploy:
     #   resources:
     #     reservations:

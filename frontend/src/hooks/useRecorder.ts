@@ -49,13 +49,15 @@ export const useRecorder = (onChunk?: (blob: Blob) => void) => {
         createAndStartRecorder();
         setIsRecording(true);
 
-        // Restart recorder every 5 seconds to get valid standalone files (with headers)
+        /* 
+        // DISABLE AUTO-ACQUISITION (every 5s) per user request
         intervalRef.current = window.setInterval(() => {
             if (mediaRecorder.current && mediaRecorder.current.state === 'recording') {
                 mediaRecorder.current.stop();
                 createAndStartRecorder();
             }
         }, 5000);
+        */
 
     }, [onChunk]);
 

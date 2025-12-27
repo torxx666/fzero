@@ -2,10 +2,8 @@ fastapi
 uvicorn
 python-multipart
 openai-whisper
+f5-tts
 torch
 torchaudio
-transformers
-f5-tts
-ffmpeg-python
-numpy
 loguru
+gTTS
