@@ -1,6 +1,7 @@
 import { Mic, Square, Loader2, Edit3, CheckCircle2, RotateCcw, Sparkles, User, Play, Save, History, Send, Zap, Cpu, Plus, Trash2 } from 'lucide-react';
 import { useRecorder } from './hooks/useRecorder';
 import { useState, useRef, useEffect } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import AudioVisualizer from './components/AudioVisualizer';
 
 interface Recording {
@@ -29,6 +30,61 @@ function App() {
     const [voices, setVoices] = useState<VoiceProfile[]>([]);
     const [selectedVoiceId, setSelectedVoiceId] = useState<string | null>(null);
     const [isSavingVoice, setIsSavingVoice] = useState(false);
+
+    // WebSocket Status : pour recevoir les mises à jour en temps réel durant la synthèse
+    const [clientId] = useState(() => uuidv4());
+    const [statusMessage, setStatusMessage] = useState("");
+    const [wsConnected, setWsConnected] = useState(false);
+
+    // Initialisation de la connexion WebSocket au montage du composant
+    useEffect(() => {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host;
+        // L'URL pointe vers le backend via le proxy Vite (/api)
+        const wsUrl = `${protocol}//${host}/api/ws/${clientId}`;
+
+        let ws: WebSocket;
+        let reconnectTimeout: any;
+
+        const connect = () => {
+            console.log("Connecting to WebSocket...");
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                console.log("WebSocket Connected");
+                setWsConnected(true);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.status) {
+                        setStatusMessage(data.status);
+                    }
+                } catch (e) {
+                    console.error("WS Message Error:", e);
+                }
+            };
+
+            ws.onclose = () => {
+                console.log("WebSocket Disconnected. Reconnecting...");
+                setWsConnected(false);
+                reconnectTimeout = setTimeout(connect, 3000);
+            };
+
+            ws.onerror = (err) => {
+                console.error("WebSocket Error:", err);
+                ws.close();
+            };
+        };
+
+        connect();
+
+        return () => {
+            if (ws) ws.close();
+            clearTimeout(reconnectTimeout);
+        };
+    }, [clientId]);
 
     const transcriptRef = useRef<HTMLTextAreaElement>(null);
 
@@ -170,31 +226,50 @@ function App() {
         }
     };
 
-    const handleSynthesize = async (textToUse: string, useStandard: boolean = false, useBasic: boolean = false) => {
-        if (!textToUse.trim()) return;
-
+    /**
+     * handleSynthesize : Déclenche la génération de voix (TTS)
+     * @param engine : "f5", "xtts" ou "basic"
+     */
+    const handleSynthesize = async (engine: string = "f5") => {
+        if (!transcript) return;
         setIsSynthesizing(true);
+        setStatusMessage("Envoi de la requête...");
         try {
-            const response = await fetch('/api/synthesize', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+            const response = await fetch("/api/synthesize", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    text: textToUse,
-                    use_standard: useStandard,
-                    basic: useBasic,
-                    voice_id: selectedVoiceId // Send selected voice Profile ID
+                    text: transcript,
+                    engine,
+                    voice_id: selectedVoiceId,
+                    client_id: clientId // On passe l'ID client pour que le backend sache à qui envoyer les logs WS
                 }),
             });
 
-            if (!response.ok) throw new Error("Synthesis failed");
+            if (!response.ok) {
+                const errorBlob = await response.blob();
+                const errorText = await errorBlob.text();
+                const errorData = JSON.parse(errorText);
+                alert("Erreur: " + (errorData.error || "Échec de la synthèse"));
+                setStatusMessage("Erreur lors de la synthèse");
+                throw new Error("Synthesis failed");
+            }
 
             const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
-            setAudioUrl(url);
-            const audio = new Audio(url);
-            audio.play();
-        } catch (error) {
-            console.error('Synthesis failed:', error);
+            if (blob.type.includes("audio")) {
+                const url = URL.createObjectURL(blob);
+                setAudioUrl(url);
+                setStatusMessage(""); // Clear status on success
+                const audio = new Audio(url);
+                audio.play();
+            } else {
+                const errorData = JSON.parse(await blob.text());
+                alert("Erreur: " + (errorData.error || "Échec de la synthèse"));
+                setStatusMessage("Erreur lors de la synthèse");
+            }
+        } catch (err) {
+            console.error(err);
+            setStatusMessage("Erreur de connexion");
         } finally {
             setIsSynthesizing(false);
         }
@@ -325,6 +400,32 @@ function App() {
 
                 {/* Right Section: Studio */}
                 <section className="w-[450px] flex flex-col gap-6">
+                    {/* Status Message */}
+                    {statusMessage && (
+                        <div style={{
+                            marginTop: '10px',
+                            padding: '8px 12px',
+                            backgroundColor: 'rgba(255, 255, 255, 0.1)',
+                            borderRadius: '8px',
+                            fontSize: '14px',
+                            color: '#a0aec0',
+                            fontStyle: 'italic',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px'
+                        }}>
+                            <span style={{
+                                width: '8px',
+                                height: '8px',
+                                backgroundColor: '#4299e1',
+                                borderRadius: '50%',
+                                display: 'inline-block',
+                                animation: 'pulse 1.5s infinite'
+                            }}></span>
+                            {statusMessage}
+                        </div>
+                    )}
+
                     {/* Synthesis Controls */}
                     <div className="p-8 rounded-3xl glass border border-white/10 bg-white/5 shadow-xl space-y-6">
                         <div className="flex items-center justify-between">
@@ -403,7 +504,7 @@ function App() {
                                         Mode Ma Voix
                                     </button>
                                     <button
-                                        onClick={() => handleSynthesize(transcript, true, false)}
+                                        onClick={() => handleSynthesize(transcript, true, false, "f5")}
                                         disabled={!transcript || isSynthesizing}
                                         className="flex-1 py-4 rounded-2xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 font-bold flex items-center justify-center gap-3 transition-all hover:scale-[1.02] disabled:opacity-50"
                                     >
@@ -411,6 +512,15 @@ function App() {
                                         Mode Pro
                                     </button>
                                 </div>
+
+                                <button
+                                    onClick={() => handleSynthesize(transcript, false, false, "xtts")}
+                                    disabled={!transcript || isSynthesizing}
+                                    className="w-full py-4 rounded-2xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold flex items-center justify-center gap-3 transition-all hover:-translate-y-1 shadow-lg shadow-indigo-600/20 disabled:opacity-50"
+                                >
+                                    {isSynthesizing ? <Loader2 className="animate-spin" /> : <Sparkles size={18} />}
+                                    Mode Clone Plus (Coqui)
+                                </button>
                             </div>
                         </div>
                     </div>

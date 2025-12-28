@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Request
+from fastapi import FastAPI, UploadFile, File, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool # Pour exécuter les tâches lourdes sans bloquer
 import whisper
@@ -19,6 +19,48 @@ import os
 import shutil
 
 app = FastAPI()
+
+# --- WebSocket Management ---
+
+class ConnectionManager:
+    """
+    Gère les connexions WebSocket actives pour envoyer des notifications
+    en temps réel au frontend (ex: statut de la synthèse).
+    """
+    def __init__(self):
+        self.active_connections: dict[str, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+        logger.info(f"WebSocket: Client {client_id} connected.")
+
+    def disconnect(self, client_id: str):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+            logger.info(f"WebSocket: Client {client_id} disconnected.")
+
+    async def send_personal_message(self, message: dict, client_id: str):
+        if client_id in self.active_connections:
+            await self.active_connections[client_id].send_json(message)
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    await manager.connect(websocket, client_id)
+    try:
+        while True:
+            # Keep connection alive
+            data = await websocket.receive_text()
+            # Respond to ping if needed
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        manager.disconnect(client_id)
+    except Exception as e:
+        logger.error(f"WebSocket error for {client_id}: {e}")
+        manager.disconnect(client_id)
 
 # Configuration CORS (Cross-Origin Resource Sharing)
 # Permet au frontend React (ou autre origine) de communiquer avec ce backend.
@@ -265,27 +307,44 @@ async def delete_voice(voice_id: str):
     return {"status": "deleted"}
 
 @app.post("/synthesize")
-async def synthesize(request: Request):
+async def synthesize_text(request: Request):
     """
-    Endpoint pour la synthèse vocale (TTS).
-    Accepte maintenant un voice_id pour utiliser un profil spécifique.
+    Point d'entrée principal pour la synthèse vocale (TTS).
+    Prend en charge :
+    - F5-TTS (Clonage de voix ou mode Standard)
+    - Coqui XTTS-v2 (Clonage avancé multilingue)
+    - gTTS (Synthèse basique rapide)
+    Supporte les notifications WebSocket via client_id.
     """
+    logger.info("Synthesis | Incoming request received")
     data = await request.json()
-    text = data.get("text", "")
-    use_standard = data.get("use_standard", False)
-    use_basic = data.get("basic", False) 
-    voice_id = data.get("voice_id", None) # Nouveau : ID d'un profil vocal
-    
+    text = data.get("text")
+    use_basic = data.get("use_basic", False) # Pour forcer gTTS
+    use_standard = data.get("use_standard", False) # Pour utiliser la voix pro "standard"
+    voice_id = data.get("voice_id") # ID d'un profil vocal sauvegardé
+    client_id = data.get("client_id") # ID du client pour le feedback WebSocket
+
+    async def notify_status(status: str):
+        """Envoie une mise à jour de statut au client via WebSocket."""
+        if client_id:
+            logger.debug(f"WS Notification: {status} for client {client_id}")
+            await manager.send_personal_message({"status": status}, client_id)
+
     if not text:
+        logger.warning("Synthesis | Request rejected: No text provided")
         return {"error": "No text provided"}
 
+    # Nom de fichier unique pour la sortie audio
     output_path = f"output_{uuid.uuid4()}.wav"
     
-    # Détermination de la voix à utiliser
+    # 1. Sélection de la voix de référence
+    # Par défaut, on utilise la dernière voix enregistrée (clonage automatique)
     ref_audio = last_audio_path
     ref_text = last_audio_text
     
+    # Si un profil vocal spécifique est sélectionné, on le récupère en DB
     if voice_id:
+        logger.info(f"Synthesis | Retrieving voice profile: {voice_id}")
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('SELECT audio_path, ref_text FROM voice_profiles WHERE id = ?', (voice_id,))
@@ -295,32 +354,44 @@ async def synthesize(request: Request):
         if row:
             ref_audio = row[0]
             ref_text = row[1]
-            logger.info(f"Using Saved Voice Profile: {voice_id}")
+            logger.info(f"Synthesis | Using Saved Voice: {voice_id}")
         else:
-            logger.warning(f"Voice Profile {voice_id} not found, falling back to last audio.")
+            logger.warning(f"Synthesis | Voice Profile {voice_id} not found, using last recording.")
+
+    # 2. Choix du moteur de synthèse (Engine)
+    engine = data.get("engine", "f5")
+    if use_basic: engine = "basic"
 
     try:
-        path = None
-        if use_basic:
-            logger.info("Main | API Synthesis | Mode: BASIC (gTTS)")
-            path = await run_in_threadpool(tts_service.synthesize_basic, text, output_path)
-        else:
-            logger.info(f"Main | API Synthesis | Mode: {'STANDARD' if use_standard else 'CLONE'} (F5-TTS)")
-            path = await run_in_threadpool(
-                tts_service.synthesize,
-                text, 
-                output_path, 
-                ref_audio_path=ref_audio, # Utilise la voix sélectionnée ou la dernière
-                ref_text=ref_text,
-                use_standard=use_standard
-            )
+        await notify_status(f"Démarrage de la synthèse avec {engine}...")
+        
+        # Le chargement des gros modèles (AI) peut être long la première fois
+        if engine in ["f5", "xtts"]:
+            await notify_status("Préparation du modèle IA (cela peut prendre quelques secondes)...")
+
+        # Exécution de la synthèse (CPU-bound) dans un thread séparé pour ne pas geler l'API
+        logger.info(f"Synthesis | Running engine: {engine} for text: '{text[:30]}...'")
+        path = await run_in_threadpool(
+            tts_service.synthesize_with_engine,
+            engine,
+            text,
+            output_path,
+            ref_audio_path=ref_audio,
+            ref_text=ref_text,
+            use_standard=use_standard
+        )
         
         if path and os.path.exists(path):
+            logger.success(f"Synthesis | Success! Audio generated at {path}")
+            await notify_status("Synthèse terminée ! Envoi de l'audio...")
             return FileResponse(path, media_type="audio/wav")
         else:
+            logger.error(f"Synthesis | {engine} failed to generate audio")
+            await notify_status("Échec de la synthèse.")
             return {"error": "Synthesis failed"}
     except Exception as e:
-        logger.error(f"Synthesis endpoint error: {e}")
+        logger.error(f"Synthesis | Critical Error: {e}")
+        await notify_status(f"Erreur : {str(e)}")
         return {"error": str(e)}
 
 @app.get("/")

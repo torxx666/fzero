@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     libasound2-dev \
     build-essential \
+    espeak-ng \
+    libsndfile1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
