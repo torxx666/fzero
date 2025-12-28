@@ -13,9 +13,14 @@ logger.remove()
 logger.add(sys.stderr, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
 
 from services.tts import tts_service
+from tasks import synthesize_task # Nouveau : Import de la tâche Celery
+from celery.result import AsyncResult
 from fastapi.responses import FileResponse
 import uuid
 import os
+import shutil
+import asyncio
+import sqlite3
 import shutil
 
 app = FastAPI()
@@ -310,87 +315,85 @@ async def delete_voice(voice_id: str):
 async def synthesize_text(request: Request):
     """
     Point d'entrée principal pour la synthèse vocale (TTS).
-    Prend en charge :
-    - F5-TTS (Clonage de voix ou mode Standard)
-    - Coqui XTTS-v2 (Clonage avancé multilingue)
-    - gTTS (Synthèse basique rapide)
-    Supporte les notifications WebSocket via client_id.
+    MODE DECOUPLE : Utilise Celery pour déléguer le travail aux workers.
     """
     logger.info("Synthesis | Incoming request received")
     data = await request.json()
     text = data.get("text")
-    use_basic = data.get("use_basic", False) # Pour forcer gTTS
-    use_standard = data.get("use_standard", False) # Pour utiliser la voix pro "standard"
-    voice_id = data.get("voice_id") # ID d'un profil vocal sauvegardé
-    client_id = data.get("client_id") # ID du client pour le feedback WebSocket
+    use_basic = data.get("use_basic", False)
+    use_standard = data.get("use_standard", False)
+    voice_id = data.get("voice_id")
+    client_id = data.get("client_id")
 
     async def notify_status(status: str):
         """Envoie une mise à jour de statut au client via WebSocket."""
         if client_id:
-            logger.debug(f"WS Notification: {status} for client {client_id}")
             await manager.send_personal_message({"status": status}, client_id)
 
     if not text:
-        logger.warning("Synthesis | Request rejected: No text provided")
         return {"error": "No text provided"}
 
-    # Nom de fichier unique pour la sortie audio
     output_path = f"output_{uuid.uuid4()}.wav"
     
-    # 1. Sélection de la voix de référence
-    # Par défaut, on utilise la dernière voix enregistrée (clonage automatique)
+    # Sélection de la voix (Logique simplifiée pour l'exemple)
     ref_audio = last_audio_path
     ref_text = last_audio_text
     
-    # Si un profil vocal spécifique est sélectionné, on le récupère en DB
     if voice_id:
-        logger.info(f"Synthesis | Retrieving voice profile: {voice_id}")
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('SELECT audio_path, ref_text FROM voice_profiles WHERE id = ?', (voice_id,))
         row = cursor.fetchone()
         conn.close()
-        
         if row:
-            ref_audio = row[0]
-            ref_text = row[1]
-            logger.info(f"Synthesis | Using Saved Voice: {voice_id}")
-        else:
-            logger.warning(f"Synthesis | Voice Profile {voice_id} not found, using last recording.")
+            ref_audio, ref_text = row[0], row[1]
 
-    # 2. Choix du moteur de synthèse (Engine)
     engine = data.get("engine", "f5")
     if use_basic: engine = "basic"
 
     try:
-        await notify_status(f"Démarrage de la synthèse avec {engine}...")
+        # --- DELEGATION A CELERY ---
+        logger.info(f"Synthesis | Queuing task for engine: {engine}")
+        await notify_status(f"Mise en file d'attente ({engine})...")
         
-        # Le chargement des gros modèles (AI) peut être long la première fois
-        if engine in ["f5", "xtts"]:
-            await notify_status("Préparation du modèle IA (cela peut prendre quelques secondes)...")
-
-        # Exécution de la synthèse (CPU-bound) dans un thread séparé pour ne pas geler l'API
-        logger.info(f"Synthesis | Running engine: {engine} for text: '{text[:30]}...'")
-        path = await run_in_threadpool(
-            tts_service.synthesize_with_engine,
-            engine,
-            text,
-            output_path,
-            ref_audio_path=ref_audio,
-            ref_text=ref_text,
-            use_standard=use_standard
+        task = synthesize_task.delay(
+            engine, text, os.path.abspath(output_path), 
+            ref_audio, ref_text, use_standard
         )
         
-        if path and os.path.exists(path):
-            logger.success(f"Synthesis | Success! Audio generated at {path}")
-            await notify_status("Synthèse terminée ! Envoi de l'audio...")
-            return FileResponse(path, media_type="audio/wav")
-        else:
-            logger.error(f"Synthesis | {engine} failed to generate audio")
-            await notify_status("Échec de la synthèse.")
-            return {"error": "Synthesis failed"}
+        # --- SURVEILLANCE DE LA TACHE (Status Relay) ---
+        # On surveille la tâche Celery et on renvoie les infos via WebSocket
+        # Dès que c'est fini, on renvoie le fichier.
+        
+        last_status = ""
+        while not task.ready():
+            # On récupère l'état 'meta' défini dans synthesize_task
+            result = AsyncResult(task.id)
+            if result.info and isinstance(result.info, dict):
+                current_status = result.info.get('status', "")
+                if current_status != last_status:
+                    await notify_status(current_status)
+                    last_status = current_status
+            
+            await asyncio.sleep(0.5) # Ne pas saturer Redis
+        
+        # Récupération du résultat final
+        final_result = task.get()
+        
+        if final_result.get('status') == 'Terminé':
+            path = final_result.get('path')
+            if path and os.path.exists(path):
+                logger.success(f"Synthesis | Worker success: {path}")
+                await notify_status("Synthèse terminée ! Envoi de l'audio...")
+                return FileResponse(path, media_type="audio/wav")
+        
+        error_msg = final_result.get('error', 'Unknown worker error')
+        logger.error(f"Synthesis | Worker failure: {error_msg}")
+        await notify_status(f"Erreur Worker : {error_msg}")
+        return {"error": error_msg}
+
     except Exception as e:
-        logger.error(f"Synthesis | Critical Error: {e}")
+        logger.error(f"Synthesis | Gateway Error: {e}")
         await notify_status(f"Erreur : {str(e)}")
         return {"error": str(e)}
 
