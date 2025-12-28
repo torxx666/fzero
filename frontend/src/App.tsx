@@ -1,11 +1,17 @@
-import { Mic, Square, Loader2, Edit3, CheckCircle2, RotateCcw, Sparkles, User, Play, Save, History, Send } from 'lucide-react';
+import { Mic, Square, Loader2, Edit3, CheckCircle2, RotateCcw, Sparkles, User, Play, Save, History, Send, Zap, Cpu, Plus, Trash2 } from 'lucide-react';
 import { useRecorder } from './hooks/useRecorder';
 import { useState, useRef, useEffect } from 'react';
+import AudioVisualizer from './components/AudioVisualizer';
 
 interface Recording {
     id: string;
     text: string;
     created_at: string;
+}
+
+interface VoiceProfile {
+    id: string;
+    name: string;
 }
 
 function App() {
@@ -16,13 +22,36 @@ function App() {
     const [isSynthesizing, setIsSynthesizing] = useState(false);
     const [recordings, setRecordings] = useState<Recording[]>([]);
     const [isSaving, setIsSaving] = useState(false);
+    const [cudaAvailable, setCudaAvailable] = useState<boolean>(false);
+    const [deviceName, setDeviceName] = useState<string>("Checking...");
+
+    // Voice Profiles States
+    const [voices, setVoices] = useState<VoiceProfile[]>([]);
+    const [selectedVoiceId, setSelectedVoiceId] = useState<string | null>(null);
+    const [isSavingVoice, setIsSavingVoice] = useState(false);
 
     const transcriptRef = useRef<HTMLTextAreaElement>(null);
 
-    // Fetch history on mount
+    // Fetch history and system status on mount
     useEffect(() => {
         fetchRecordings();
+        fetchVoices();
+        checkBackendStatus();
     }, []);
+
+    const checkBackendStatus = async () => {
+        try {
+            const response = await fetch('/api/');
+            if (response.ok) {
+                const data = await response.json();
+                setCudaAvailable(data.cuda_available);
+                setDeviceName(data.device_name);
+            }
+        } catch (error) {
+            console.error('Failed to check backend status:', error);
+            setDeviceName("Offline");
+        }
+    };
 
     const fetchRecordings = async () => {
         try {
@@ -33,6 +62,18 @@ function App() {
             }
         } catch (error) {
             console.error('Failed to fetch history:', error);
+        }
+    };
+
+    const fetchVoices = async () => {
+        try {
+            const response = await fetch('/api/voices');
+            if (response.ok) {
+                const data = await response.json();
+                setVoices(data);
+            }
+        } catch (error) {
+            console.error('Failed to fetch voices:', error);
         }
     };
 
@@ -57,6 +98,42 @@ function App() {
         }
     };
 
+    const handleSaveVoice = async () => {
+        const name = prompt("Nom du profil vocal :");
+        if (!name) return;
+
+        setIsSavingVoice(true);
+        try {
+            const response = await fetch('/api/voices', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name }),
+            });
+            if (response.ok) {
+                await fetchVoices();
+            } else {
+                alert("Erreur : Enregistrez d'abord une voix !");
+            }
+        } catch (error) {
+            console.error('Save voice failed:', error);
+        } finally {
+            setIsSavingVoice(false);
+        }
+    };
+
+    const handleDeleteVoice = async (id: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!confirm("Supprimer ce profil vocal ?")) return;
+
+        try {
+            await fetch(`/api/voices/${id}`, { method: 'DELETE' });
+            await fetchVoices();
+            if (selectedVoiceId === id) setSelectedVoiceId(null);
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
     const handleTranscribeBlob = async (blob: Blob) => {
         setIsUploading(true);
         const formData = new FormData();
@@ -78,7 +155,7 @@ function App() {
         }
     };
 
-    const { isRecording, startRecording, stopRecording } = useRecorder(handleTranscribeBlob);
+    const { isRecording, startRecording, stopRecording, stream } = useRecorder(handleTranscribeBlob);
 
     const toggleRecording = () => {
         if (isRecording) {
@@ -88,6 +165,8 @@ function App() {
             setAudioUrl(null);
             setIsValidated(false);
             startRecording();
+            // Reset selected voice to null (use current recording) when starting new recording
+            setSelectedVoiceId(null);
         }
     };
 
@@ -102,7 +181,8 @@ function App() {
                 body: JSON.stringify({
                     text: textToUse,
                     use_standard: useStandard,
-                    basic: useBasic
+                    basic: useBasic,
+                    voice_id: selectedVoiceId // Send selected voice Profile ID
                 }),
             });
 
@@ -142,6 +222,15 @@ function App() {
                 </div>
 
                 <div className="flex items-center gap-4">
+                    {/* CUDA/CPU Status Badge */}
+                    <div className={`flex items-center gap-2 px-4 py-2 rounded-full border text-[10px] font-bold uppercase tracking-widest ${cudaAvailable
+                        ? 'bg-green-500/10 border-green-500/20 text-green-400'
+                        : 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+                        }`}>
+                        {cudaAvailable ? <Zap size={12} className="fill-current" /> : <Cpu size={12} />}
+                        <span>{cudaAvailable ? `GPU ACCEL: ${deviceName}` : `CPU MODE: ${deviceName}`}</span>
+                    </div>
+
                     <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-slate-400">
                         <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                         Server Active
@@ -165,18 +254,36 @@ function App() {
                                     <span className="text-red-500 text-[10px] font-black uppercase tracking-[0.3em]">Enregistrement Live</span>
                                 </div>
                             )}
+
+                            {/* Save Voice Button */}
+                            <button
+                                onClick={handleSaveVoice}
+                                disabled={isRecording || isSavingVoice}
+                                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-indigo-500/20 border border-white/10 hover:border-indigo-500/50 text-[10px] font-bold uppercase text-slate-400 hover:text-indigo-400 transition-all"
+                            >
+                                {isSavingVoice ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+                                Sauvegarder cette Voix
+                            </button>
                         </div>
 
                         <div className="flex-1 flex flex-col items-center justify-center gap-10">
-                            <button
-                                onClick={toggleRecording}
-                                className={`w-36 h-36 rounded-full flex items-center justify-center transition-all duration-500 transform active:scale-95 ${isRecording
-                                    ? 'bg-red-500 shadow-[0_0_80px_-10px_rgba(239,68,68,0.6)] animate-pulse'
-                                    : 'bg-indigo-600 hover:bg-indigo-500 shadow-[0_0_80px_-10px_rgba(79,70,229,0.5)] hover:-translate-y-1'
-                                    }`}
-                            >
-                                {isRecording ? <Square size={48} fill="white" stroke="none" /> : <Mic size={56} />}
-                            </button>
+                            <div className="relative flex items-center justify-center w-[300px] h-[300px]">
+                                {isRecording && (
+                                    <div className="absolute inset-0 z-0">
+                                        <AudioVisualizer stream={stream} isRecording={isRecording} />
+                                    </div>
+                                )}
+
+                                <button
+                                    onClick={toggleRecording}
+                                    className={`relative z-10 w-36 h-36 rounded-full flex items-center justify-center transition-all duration-500 transform active:scale-95 ${isRecording
+                                        ? 'bg-transparent' // Invisible button when recording, user clicks the center of Visualizer
+                                        : 'bg-indigo-600 hover:bg-indigo-500 shadow-[0_0_80px_-10px_rgba(79,70,229,0.5)] hover:-translate-y-1'
+                                        }`}
+                                >
+                                    {isRecording ? <Square size={48} className="text-white drop-shadow-md" fill="white" stroke="none" /> : <Mic size={56} />}
+                                </button>
+                            </div>
 
                             <div className="text-center space-y-2">
                                 <p className="text-slate-400 text-sm font-medium">
@@ -234,7 +341,44 @@ function App() {
                             </div>
                         </div>
 
-                        <div className="space-y-4">
+                        {/* Voice Selector Grid */}
+                        <div className="space-y-2">
+                            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest px-1">Choix de la Voix</p>
+                            <div className="grid grid-cols-2 gap-2">
+                                <button
+                                    onClick={() => setSelectedVoiceId(null)}
+                                    className={`p-3 rounded-xl border text-xs font-bold transition-all relative ${selectedVoiceId === null
+                                        ? 'bg-pink-500/20 border-pink-500 text-pink-400'
+                                        : 'bg-white/5 border-white/5 text-slate-400 hover:bg-white/10'
+                                        }`}
+                                >
+                                    Dernière Captation
+                                    {selectedVoiceId === null && <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-pink-500 animate-pulse"></span>}
+                                </button>
+
+                                {voices.map(voice => (
+                                    <div key={voice.id} className="relative group">
+                                        <button
+                                            onClick={() => setSelectedVoiceId(voice.id)}
+                                            className={`w-full h-full p-3 rounded-xl border text-xs font-bold transition-all ${selectedVoiceId === voice.id
+                                                ? 'bg-indigo-500/20 border-indigo-500 text-indigo-400'
+                                                : 'bg-white/5 border-white/5 text-slate-400 hover:bg-white/10'
+                                                }`}
+                                        >
+                                            {voice.name}
+                                        </button>
+                                        <button
+                                            onClick={(e) => handleDeleteVoice(voice.id, e)}
+                                            className="absolute -top-1 -right-1 p-1 rounded-full bg-red-500 text-white opacity-0 group-hover:opacity-100 transition-all scale-75 hover:scale-100"
+                                        >
+                                            <Trash2 size={10} />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="space-y-4 pt-4 border-t border-white/5">
                             <div className="p-4 rounded-xl bg-black/40 border border-white/5 min-h-[80px] text-sm text-slate-300 italic leading-relaxed">
                                 {transcript || "Sélectionnez un texte dans l'historique ou enregistrez-en un nouveau..."}
                             </div>

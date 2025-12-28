@@ -3,6 +3,7 @@ import { useState, useRef, useCallback } from 'react';
 export const useRecorder = (onChunk?: (blob: Blob) => void) => {
     const [isRecording, setIsRecording] = useState(false);
     const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+    const [stream, setStream] = useState<MediaStream | null>(null); // New: Expose stream
     const mediaRecorder = useRef<MediaRecorder | null>(null);
     const audioChunks = useRef<Blob[]>([]);
     const intervalRef = useRef<number | null>(null);
@@ -17,49 +18,46 @@ export const useRecorder = (onChunk?: (blob: Blob) => void) => {
             intervalRef.current = null;
         }
         setIsRecording(false);
+        setStream(null); // Clear stream
     }, []);
 
     const startRecording = useCallback(async () => {
         setAudioBlob(null);
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        try {
+            const newStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            setStream(newStream); // Set stream
 
-        const createAndStartRecorder = () => {
-            const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-            const localChunks: Blob[] = [];
+            const createAndStartRecorder = () => {
+                const recorder = new MediaRecorder(newStream, { mimeType: 'audio/webm' });
+                const localChunks: Blob[] = [];
 
-            recorder.ondataavailable = (event) => {
-                if (event.data.size > 0) {
-                    localChunks.push(event.data);
-                    audioChunks.current.push(event.data); // Keep global for final blob
-                }
+                recorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        localChunks.push(event.data);
+                        audioChunks.current.push(event.data);
+                    }
+                };
+
+                recorder.onstop = () => {
+                    if (localChunks.length > 0) {
+                        const blob = new Blob(localChunks, { type: 'audio/webm' });
+                        if (onChunk) onChunk(blob);
+                    }
+                };
+
+                recorder.start();
+                mediaRecorder.current = recorder;
             };
 
-            recorder.onstop = () => {
-                if (localChunks.length > 0) {
-                    const blob = new Blob(localChunks, { type: 'audio/webm' });
-                    if (onChunk) onChunk(blob);
-                }
-            };
+            audioChunks.current = [];
+            createAndStartRecorder();
+            setIsRecording(true);
 
-            recorder.start();
-            mediaRecorder.current = recorder;
-        };
-
-        audioChunks.current = [];
-        createAndStartRecorder();
-        setIsRecording(true);
-
-        /* 
-        // DISABLE AUTO-ACQUISITION (every 5s) per user request
-        intervalRef.current = window.setInterval(() => {
-            if (mediaRecorder.current && mediaRecorder.current.state === 'recording') {
-                mediaRecorder.current.stop();
-                createAndStartRecorder();
-            }
-        }, 5000);
-        */
+        } catch (err) {
+            console.error("Error accessing microphone:", err);
+        }
 
     }, [onChunk]);
 
-    return { isRecording, audioBlob, startRecording, stopRecording };
+    return { isRecording, audioBlob, startRecording, stopRecording, stream };
 };
