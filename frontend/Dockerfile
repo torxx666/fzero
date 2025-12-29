@@ -5,7 +5,8 @@ WORKDIR /app
 # We'll use a shell script to initialize if node_modules don't exist
 # But for now, let's assume standard Vite setup
 COPY package*.json ./
-RUN npm install
+RUN --mount=type=cache,target=/root/.npm \
+    npm install
 
 COPY . .
 

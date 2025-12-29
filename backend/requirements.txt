@@ -7,6 +7,6 @@ torch
 torchaudio
 loguru
 gTTS
-TTS
 celery
 redis
+numpy==1.26.4

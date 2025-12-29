@@ -16,7 +16,7 @@ def synthesize_task(self, engine, text, output_path, ref_audio_path, ref_text, u
     self.update_state(state='PROGRESS', meta={'status': f'Démarrage avec {engine}'})
     
     try:
-        if engine in ["f5", "xtts"]:
+        if engine == "f5":
              self.update_state(state='PROGRESS', meta={'status': 'Préparation du modèle IA...'})
 
         # Appel au service TTS (identique à l'ancien code mais dans un worker)

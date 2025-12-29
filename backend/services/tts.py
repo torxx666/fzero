@@ -27,7 +27,6 @@ class TTSService:
         # Le modèle et le vocodeur sont chargés à la demande (lazy loading)
         self.model = None
         self.vocoder = None
-        self.xtts_model = None
         self.is_loading = False
         
     def _ensure_model_loaded(self):
@@ -73,17 +72,6 @@ class TTSService:
             finally:
                 self.is_loading = False
 
-    def _ensure_xtts_loaded(self):
-        if self.xtts_model is None:
-            logger.info("Initializing Coqui XTTS-v2 (Lazy Load)...")
-            from TTS.api import TTS
-            try:
-                # model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
-                self.xtts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
-                logger.success(f"XTTS-v2 Ready. CUDA: {torch.cuda.is_available()}")
-            except Exception as e:
-                logger.error(f"XTTS-v2 Load failed: {e}")
-                raise
 
     def _clean_text(self, text: str) -> str:
         """
@@ -201,27 +189,6 @@ class TTSService:
             logger.exception(f"Synthesis Engine Failure: {str(e)}")
             raise
 
-    def synthesize_xtts(self, text: str, output_path: str, ref_audio_path: str):
-        """
-        Synthèse avancée via Coqui XTTS-v2.
-        Offre un clonage de voix très performant et multilingue.
-        """
-        self._ensure_xtts_loaded()
-        logger.info(f"Synthesis XTTS-v2 | Start | Text: '{text[:50]}...'")
-        start_time = time.time()
-        try:
-            self.xtts_model.tts_to_file(
-                text=text,
-                speaker_wav=ref_audio_path,
-                language="fr",
-                file_path=output_path
-            )
-            duration = time.time() - start_time
-            logger.success(f"Synthesis XTTS-v2 | Complete in {duration:.2f}s")
-            return output_path
-        except Exception as e:
-            logger.error(f"Synthesis XTTS-v2 | Failure: {e}")
-            return None
 
     def synthesize_with_engine(self, engine: str, text: str, output_path: str, **kwargs):
         """
@@ -230,15 +197,8 @@ class TTSService:
         """
         logger.debug(f"TTS Dispatcher | Engine: {engine} | Target: {output_path}")
         if engine == "xtts":
-            ref_path = kwargs.get("ref_audio_path")
-            if not ref_path or not os.path.exists(ref_path):
-                # Try fallback
-                ref_path = "/app/last_voice_ref.wav"
-            
-            if not os.path.exists(ref_path):
-                logger.error("XTTS Error: No voice reference available.")
-                return None
-            return self.synthesize_xtts(text, output_path, ref_path)
+            logger.warning("XTTS is disabled for performance. Falling back to F5-TTS.")
+            engine = "f5"
         
         elif engine == "basic":
             return self.synthesize_basic(text, output_path)
