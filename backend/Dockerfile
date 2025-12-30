@@ -1,6 +1,7 @@
-FROM python:3.10-slim
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
 
 # Install system dependencies
+ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libasound2-dev \
@@ -13,7 +14,10 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    echo "torch==2.4.0" > constraints.txt && \
+    echo "torchvision==0.19.0" >> constraints.txt && \
+    echo "torchaudio==2.4.0" >> constraints.txt && \
+    pip install -r requirements.txt -c constraints.txt
 
 COPY . .
 

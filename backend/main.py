@@ -120,7 +120,9 @@ init_db()
 
 # Chargement du modèle Whisper
 # On utilise le modèle "base" qui offre un bon compromis vitesse/précision.
+logger.info("Loading Whisper model...")
 model = whisper.load_model("base")
+logger.success("Whisper model loaded!")
 
 # Variables globales pour garder en mémoire la dernière référence vocale
 # Cela permet d'utiliser la voix de la dernière personne qui a parlé pour le TTS (clonage de voix).
