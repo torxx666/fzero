@@ -8,6 +8,8 @@ interface Recording {
     id: string;
     text: string;
     created_at: string;
+    audio_path?: string;
+    voice_id?: string; // Added voice_id to Recording interface
 }
 
 interface VoiceProfile {
@@ -39,15 +41,13 @@ function App() {
     // Initialisation de la connexion WebSocket au montage du composant
     useEffect(() => {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = window.location.host;
-        // L'URL pointe vers le backend via le proxy Vite (/api)
-        const wsUrl = `${protocol}//${host}/api/ws/${clientId}`;
+        // Force 127.0.0.1 to avoid Windows localhost IPv6 resolution issues with Docker
+        const wsUrl = `${protocol}//127.0.0.1:8000/ws/${clientId}`;
 
         let ws: WebSocket;
         let reconnectTimeout: any;
 
         const connect = () => {
-            console.log("Connecting to WebSocket...");
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
@@ -201,6 +201,10 @@ function App() {
                 body: formData,
             });
             const data = await response.json();
+            if (data.warning) {
+                setStatusMessage("⚠️ " + data.warning);
+                alert(data.warning);
+            }
             if (data.transcript && data.transcript.trim()) {
                 setTranscript(data.transcript.trim());
             }
@@ -230,8 +234,11 @@ function App() {
      * handleSynthesize : Déclenche la génération de voix (TTS)
      * @param engine : "f5", "xtts" ou "basic"
      */
-    const handleSynthesize = async (engine: string = "f5") => {
-        if (!transcript) return;
+    /**
+     * handleSynthesize : Déclenche la génération de voix (TTS)
+     */
+    const handleSynthesize = async (text: string, useStandard: boolean, useBasic: boolean, engine: string = "f5") => {
+        if (!text) return;
         setIsSynthesizing(true);
         setStatusMessage("Envoi de la requête...");
         try {
@@ -239,10 +246,12 @@ function App() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    text: transcript,
+                    text,
                     engine,
+                    use_standard: useStandard,
+                    use_basic: useBasic,
                     voice_id: selectedVoiceId,
-                    client_id: clientId // On passe l'ID client pour que le backend sache à qui envoyer les logs WS
+                    client_id: clientId
                 }),
             });
 
@@ -275,9 +284,22 @@ function App() {
         }
     };
 
-    const handleSelectFromHistory = (text: string) => {
-        setTranscript(text);
+    const handleSelectFromHistory = async (rec: Recording) => {
+        setTranscript(rec.text);
         setIsValidated(false);
+
+        // Restore voice context from history
+        if (rec.id) {
+            try {
+                const response = await fetch(`/api/restore_recording/${rec.id}`, { method: 'POST' });
+                if (response.ok) {
+                    setStatusMessage("Contexte vocal restauré !");
+                    setSelectedVoiceId(null);
+                }
+            } catch (e) {
+                console.error("Failed to restore recording context", e);
+            }
+        }
     };
 
     return (
@@ -431,6 +453,14 @@ function App() {
                         <div className="flex items-center justify-between">
                             <h2 className="text-xs font-black uppercase tracking-[0.3em] text-pink-400">Studio Vocal</h2>
                             <div className="flex gap-2">
+                                <button
+                                    onClick={handleSaveVoice}
+                                    disabled={!transcript || isSavingVoice}
+                                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-pink-500/10 hover:bg-pink-500/20 border border-pink-500/20 text-pink-400 text-[10px] font-bold uppercase transition-all hover:scale-105 disabled:opacity-50"
+                                >
+                                    {isSavingVoice ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                                    Sauvegarder sa Voix
+                                </button>
                                 {audioUrl && (
                                     <button
                                         onClick={() => new Audio(audioUrl).play()}
@@ -513,14 +543,7 @@ function App() {
                                     </button>
                                 </div>
 
-                                <button
-                                    onClick={() => handleSynthesize(transcript, false, false, "xtts")}
-                                    disabled={!transcript || isSynthesizing}
-                                    className="w-full py-4 rounded-2xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold flex items-center justify-center gap-3 transition-all hover:-translate-y-1 shadow-lg shadow-indigo-600/20 disabled:opacity-50"
-                                >
-                                    {isSynthesizing ? <Loader2 className="animate-spin" /> : <Sparkles size={18} />}
-                                    Mode Clone Plus (Coqui)
-                                </button>
+
                             </div>
                         </div>
                     </div>
@@ -542,7 +565,7 @@ function App() {
                                 recordings.map((rec) => (
                                     <div
                                         key={rec.id}
-                                        onClick={() => handleSelectFromHistory(rec.text)}
+                                        onClick={() => handleSelectFromHistory(rec)}
                                         className="group p-4 rounded-2xl bg-white/5 border border-white/5 hover:border-indigo-500/50 hover:bg-indigo-500/5 transition-all cursor-pointer relative"
                                     >
                                         <p className="text-sm text-slate-300 line-clamp-2 leading-relaxed group-hover:text-white transition-colors">

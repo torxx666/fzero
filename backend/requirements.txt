@@ -8,3 +8,4 @@ gTTS
 celery
 redis
 numpy==1.26.4
+websockets

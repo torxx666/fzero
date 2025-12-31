@@ -5,6 +5,7 @@ import whisper
 import sys
 from loguru import logger
 import torch # Import de torch pour vérifier CUDA
+import torchaudio # Pour vérifier la durée des fichiers audio
 
 # Configuration du logging professionnel (Loguru)
 # On supprime le logger par défaut pour en ajouter un personnalisé
@@ -140,7 +141,8 @@ def process_audio_cleaning(input_path: str, output_path: str) -> bool:
     logger.info("Preprocessing | Cleaning audio (HighPass + Silence Removal)...")
     ffmpeg_cmd = (
         f"ffmpeg -y -i {input_path} "
-        f"-af \"highpass=f=200, silenceremove=start_periods=1:stop_periods=-1:start_threshold=-50dB:stop_threshold=-50dB:stop_duration=0.5\" "
+        # Relaxed cleaning: reduced highpass and less aggressive silence removal
+        f"-af \"highpass=f=100, silenceremove=start_periods=1:stop_periods=-1:start_threshold=-60dB:stop_threshold=-60dB:stop_duration=1.0\" "
         f"{output_path} > /dev/null 2>&1"
     )
     exit_code = os.system(ffmpeg_cmd)
@@ -155,9 +157,9 @@ def process_transcription(audio_path: str) -> str:
 
 def process_voice_ref_conversion(input_path: str, output_path: str):
     """
-    Convertit l'audio en format compatible F5-TTS (16kHz mono).
+    Convertit l'audio en format compatible F5-TTS (24kHz mono pour meilleure qualité).
     """
-    os.system(f"ffmpeg -y -i {input_path} -ar 16000 -ac 1 {output_path} > /dev/null 2>&1")
+    os.system(f"ffmpeg -y -i {input_path} -ar 24000 -ac 1 {output_path} > /dev/null 2>&1")
 
 @app.post("/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
@@ -195,9 +197,24 @@ async def transcribe_audio(file: UploadFile = File(...)):
         try:
             await run_in_threadpool(process_voice_ref_conversion, final_input, ref_path)
             
+            # Vérification de la durée (Qualité check)
+            duration = 0.0
+            try:
+                info = torchaudio.info(ref_path)
+                duration = info.num_frames / info.sample_rate
+                if duration < 3.0:
+                    logger.warning(f"Voice reference is too short: {duration:.2f}s (Min recommended: 3s)")
+                    return {
+                        "transcript": text, 
+                        "cleaned_available": (final_input == cleaned_path),
+                        "warning": "L'enregistrement est trop court (< 3s). La qualité de la voix clonée risque d'être mauvaise. Veuillez parler plus longtemps."
+                    }
+            except Exception as e:
+                logger.error(f"Failed to check audio duration: {e}")
+
             last_audio_path = os.path.abspath(ref_path)
             last_audio_text = text
-            logger.debug(f"Saved new voice reference: {last_audio_path}")
+            logger.debug(f"Saved new voice reference: {last_audio_path} (Duration: {duration:.2f}s)")
         except Exception as e:
             logger.error(f"Error preparing voice ref: {e}")
 
@@ -246,12 +263,40 @@ async def get_recordings():
     """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT id, text, created_at FROM recordings ORDER BY created_at DESC')
+    cursor.execute('SELECT id, text, created_at, audio_path FROM recordings ORDER BY created_at DESC')
     rows = cursor.fetchall()
     conn.close()
     
-    recordings = [{"id": r[0], "text": r[1], "created_at": r[2]} for r in rows]
+    # On renvoie aussi le chemin audio pour permettre la réutilisation
+    recordings = [{"id": r[0], "text": r[1], "created_at": r[2], "audio_path": r[3]} for r in rows]
     return recordings
+
+@app.post("/restore_recording/{id}")
+async def restore_recording(id: str):
+    """
+    Restaure un enregistrement historique comme référence vocale active.
+    """
+    global last_audio_path, last_audio_text
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT text, audio_path FROM recordings WHERE id = ?', (id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row:
+        return {"error": "Recording not found"}
+        
+    text, path = row
+    if not path or not os.path.exists(path):
+        return {"error": "Audio file not found on disk"}
+        
+    # Mise à jour des globales
+    last_audio_path = os.path.abspath(path)
+    last_audio_text = text
+    
+    logger.info(f"Restored voice context from history: {id}")
+    return {"status": "success", "restored_path": last_audio_path}
 
 # --- Gestion des Profils Vocaux ---
 
@@ -352,6 +397,16 @@ async def synthesize_text(request: Request):
 
     engine = data.get("engine", "f5")
     if use_basic: engine = "basic"
+
+    # -- Safety Check for Reference --
+    if engine == "f5" and not use_standard:
+        if not ref_audio or not os.path.exists(ref_audio):
+            logger.error("Synthesis | No reference audio available for cloning")
+            return {"error": "Aucun enregistrement vocal disponible. Parlez d'abord ou téléchargez un fichier."}
+        
+        if not ref_text or len(ref_text.strip()) < 2:
+            logger.error(f"Synthesis | Reference text too short/empty: '{ref_text}'")
+            return {"error": "La transcription de votre voix est manquante ou trop courte. Réessayez l'enregistrement."}
 
     try:
         # --- DELEGATION A CELERY ---

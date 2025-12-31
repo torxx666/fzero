@@ -2,6 +2,7 @@ import os
 from celery import Celery
 from loguru import logger
 
+
 # Configuration Redis
 REDIS_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 

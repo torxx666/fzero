@@ -25,7 +25,7 @@ services:
     volumes:
       - ./backend:/app
       - models_data:/root/.cache
-    command: celery -A tasks.celery worker --loglevel=info --concurrency=1
+    command: celery -A tasks.celery worker --loglevel=info -P solo
     environment:
       - PYTHONUNBUFFERED=1
       - HF_HOME=/root/.cache/huggingface
